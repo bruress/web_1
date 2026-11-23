@@ -14,7 +14,7 @@ declare(strict_types=1);
  * запросов исчерпает пул.
  */
 
-require __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../bootstrap.php';
 
 use App\Database;
 use App\Log;

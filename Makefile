@@ -8,7 +8,7 @@ export
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down ps logs clean composer sh psql \
+.PHONY: help init build up down ps logs clean composer migrate migrate-rollback migrate-status test sh psql \
 	mon-up mon-down mon-ps mon-check mon-reload pg-monitoring \
 	logs-up logs-down \
 	demo-db-down demo-db-up demo-load demo-errors demo-slow
@@ -41,6 +41,10 @@ help:
 	@echo "make logs      — логи всех сервисов (follow)"
 	@echo "make clean     — down -v: остановить всё и удалить volume'ы (данные БД и метрики будут потеряны)"
 	@echo "make composer  — composer install внутри php-контейнера"
+	@echo "make migrate   — применить миграции Eloquent и добавить тестовую запись"
+	@echo "make migrate-status — показать применённые и ожидающие миграции"
+	@echo "make migrate-rollback — откатить последний пакет миграций (удаляет его данные)"
+	@echo "make test      — интеграционные проверки в отдельной временной схеме PostgreSQL"
 	@echo "make sh        — shell в php-контейнере"
 	@echo "make psql      — консоль psql к postgres"
 	@echo ""
@@ -101,6 +105,18 @@ clean:
 # владельца из UID/GID, заданных при `make init`, а не root
 composer:
 	docker compose exec -u www-data php composer install
+
+migrate:
+	docker compose exec -u www-data php php bin/migrate.php up
+
+migrate-rollback:
+	docker compose exec -u www-data php php bin/migrate.php down
+
+migrate-status:
+	docker compose exec -u www-data php php bin/migrate.php status
+
+test:
+	docker compose exec -u www-data php composer test
 
 sh:
 	docker compose exec php sh

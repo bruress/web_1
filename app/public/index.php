@@ -2,25 +2,33 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../bootstrap.php';
 
 use App\Database;
+use App\Log;
 use App\Metrics;
+use App\Models\Note;
 
 // Обработка формы добавления записи. Редиректим после POST (Post/Redirect/Get),
 // чтобы повторная отправка формы не происходила при обновлении страницы
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['note'])) {
-    try {
-        $pdo = Database::connect();
-        $stmt = $pdo->prepare('INSERT INTO demo (note) VALUES (:note)');
-        $stmt->execute(['note' => (string) $_POST['note']]);
-        // Считаем только успешно сохранённые записи — после execute(), а не до
-        Metrics::noteCreated();
-    } catch (\Throwable $e) {
-        // Ошибка подключения/записи — статус БД и так будет виден на странице ниже
+$formError = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $note = $_POST['note'] ?? null;
+    if (!is_string($note) || trim($note) === '' || mb_strlen($note) > 500) {
+        $formError = 'Введите заметку длиной от 1 до 500 символов.';
+        http_response_code(422);
+    } else {
+        try {
+            Note::create(['note' => trim($note)]);
+            Metrics::noteCreated();
+            header('Location: /', true, 303);
+            exit;
+        } catch (\Throwable $e) {
+            Log::error('note_create_failed', ['exception' => $e]);
+            $formError = 'Не удалось сохранить заметку. Попробуйте позже.';
+            http_response_code(503);
+        }
     }
-    header('Location: /');
-    exit;
 }
 
 $phpVersion = PHP_VERSION;
@@ -32,11 +40,12 @@ $dbError = null;
 $rows = [];
 
 try {
-    $pdo = Database::connect();
-    $dbVersion = (string) $pdo->query('SELECT version()')->fetchColumn();
-    $rows = $pdo->query('SELECT id, created_at, note FROM demo ORDER BY id DESC')->fetchAll();
+    $dbVersion = (string) Database::boot()->getConnection()->selectOne('SELECT version() AS version')->version;
+    $rows = Note::orderByDesc('id')->get();
 } catch (\Throwable $e) {
-    $dbError = $e->getMessage();
+    Log::error('notes_read_failed', ['exception' => $e]);
+    $dbError = 'База данных временно недоступна.';
+    http_response_code(503);
 }
 
 function h(string $value): string
@@ -88,7 +97,7 @@ function h(string $value): string
     </dl>
 
     <h2>Таблица demo</h2>
-    <?php if ($rows): ?>
+    <?php if (count($rows) > 0): ?>
         <table>
             <tr><th>id</th><th>создано</th><th>note</th></tr>
             <?php foreach ($rows as $row): ?>
@@ -103,6 +112,9 @@ function h(string $value): string
         <p>Нет данных (таблица пуста или БД недоступна).</p>
     <?php endif; ?>
 
+    <?php if ($formError !== null): ?>
+        <p class="fail" role="alert"><?= h($formError) ?></p>
+    <?php endif; ?>
     <form method="post" action="/">
         <input type="text" name="note" placeholder="Новая запись" required maxlength="500">
         <button type="submit">Добавить</button>

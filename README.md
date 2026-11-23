@@ -1,20 +1,32 @@
-# Учебное окружение: nginx + php-fpm + PostgreSQL
+# web_1 — Eloquent, миграции и Monolog
 
-Простой стек для практики Docker Compose: nginx как веб-сервер и
+Задание №1 на основе [romicharroyo/local_zoo_for_vyatgu](https://github.com/romicharroyo/local_zoo_for_vyatgu).
+История исходного проекта сохранена. Публичный репозиторий решения:
+[bruress/web_1](https://github.com/bruress/web_1).
+
+Стек для практики Docker Compose: nginx как веб-сервер и
 реверс-прокси к php-fpm 8.5 (чистый PHP, без фреймворков), PostgreSQL 18
 как база данных. Все три образа собираются локально из Dockerfile в `docker/`.
 
 ## Быстрый старт
 
+Нужны Git, Docker с Compose v2 и GNU Make. PHP и Composer на хосте не нужны.
+
 ```bash
-make init && make up && make composer
+git clone https://github.com/bruress/web_1.git
+cd web_1
+```
+
+```bash
+make init && make up && make composer && make migrate
 ```
 
 - `make init` создаёт `.env` из `.env.example` и подставляет в него UID/GID
   текущего пользователя (нужно, чтобы файлы, которые пишет php-контейнер,
   на хосте принадлежали вам, а не root).
 - `make up` собирает (если ещё не собраны) и поднимает контейнеры.
-- `make composer` ставит зависимости приложения в `app/vendor/`.
+- `make composer` ставит зафиксированные в `app/composer.lock` зависимости в `app/vendor/`.
+- `make migrate` создаёт таблицы и добавляет тестовую заметку через Eloquent.
 
 После этого:
 
@@ -27,6 +39,96 @@ make init && make up && make composer
 
 Мониторинг, алерты и логи подключаются поверх базы (`make mon-up`,
 `make logs-up`) — см. раздел [«Мониторинг и логи»](#мониторинг-и-логи).
+
+## Реализация задания №1
+
+| Требование | Реализация |
+|---|---|
+| Скелет приложения и библиотеки | Исходное Docker-окружение, PSR-4, Composer и lock-файл; Illuminate Database / Events / Filesystem 12, Monolog 3 |
+| Eloquent | `app/src/Database.php` настраивает Capsule из переменных окружения; `app/src/Models/Note.php` описывает таблицу `demo` |
+| Мигратор | Настоящий `Illuminate\Database\Migrations\Migrator`, CLI `app/bin/migrate.php`, история запусков в таблице `migrations` |
+| Тестовая миграция | `app/database/migrations/`: создание `demo` через Schema Builder и добавление тестовой заметки через модель Eloquent |
+| Переход `index.php` на Eloquent | Чтение через `Note::orderByDesc('id')->get()`, сохранение через `Note::create()` |
+| Monolog | `app/src/Log.php`, JSON-форматтер, ротация файлов и вывод в stderr для Docker / Graylog |
+| Каждый HTTP-запрос с телом ответа | Общий `app/bootstrap.php` подключён во всех PHP-эндпоинтах; `RequestLogger` сохраняет метод, URI, статус, request ID, длительность и полное тело ответа |
+
+### Миграции
+
+```bash
+make migrate-status      # какие миграции выполнены и какие ожидают
+make migrate             # применить ожидающие; повторный запуск ничего не дублирует
+make migrate-rollback    # откатить последний пакет
+make migrate             # применить снова
+```
+
+Откат первого пакета удаляет таблицу `demo` вместе с её данными. При обычном
+обновлении старого тома `make migrate` сохраняет уже существующую таблицу и
+записи из исходного `initdb`; удалять Docker volume не требуется.
+Теперь `initdb/01-init.sql` не создаёт таблицы приложения: за схему отвечают миграции.
+
+Команды без Make (внутри PHP-контейнера):
+
+```bash
+php bin/migrate.php up
+php bin/migrate.php status
+php bin/migrate.php down
+# или composer migrate / composer migrate:status / composer migrate:rollback
+```
+
+Подключение использует `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`,
+которые Compose получает из `.env`. Дополнительно поддерживаются `DB_SCHEMA`
+(по умолчанию `public`) и `DB_SSLMODE` (по умолчанию `prefer`).
+`Database::connect()` сохранён для health-check и демонстрации `pg_sleep`,
+но получает PDO-соединение из того же Capsule.
+
+### HTTP-журнал Monolog
+
+```bash
+curl -i http://127.0.0.1:8080/
+curl -i -d 'note=Hello Eloquent' http://127.0.0.1:8080/
+cat app/storage/logs/app-*.log
+docker compose logs php
+```
+
+На каждый обработанный PHP-запрос записывается ровно одно событие `http_request`.
+Поле `response_body` содержит полное тело ответа; у редиректа 303 и HEAD оно
+пустое. Ошибки 5xx получают уровень `error`, остальные ответы — `info`.
+Ошибки БД дополнительно записываются с исключением; клиент получает 503 без SQL
+и реквизитов подключения. Некорректные заметки возвращают 422.
+
+Пример записи (поле `response_body` здесь сокращено для примера):
+
+```json
+{"time":"2026-11-23T22:00:00+03:00","log_level":"info","message":"http_request","request_id":"a9b4c010","route":"/index.php","method":"GET","uri":"/","remote_addr":"127.0.0.1","status":200,"duration_ms":4.2,"response_body":"<!DOCTYPE html>..."}
+```
+
+Файлы `app/storage/logs/app-YYYY-MM-DD.log` ротируются ежедневно; сохраняются
+последние семь файлов. `LOG_PATH` меняет путь/имя файла, `LOG_STDERR=0` отключает
+дублирование в stderr. Эти переменные можно передать PHP-процессу или добавить
+в `services.php.environment` Compose. Папка журналов доступна на запись
+пользователю `www-data` с UID/GID хоста. Журналы и `vendor/` исключены из Git.
+
+Формат сохраняет поля `log_level`, `request_id` и `route` существующего Graylog.
+Один request ID связывает nginx, PHP и PostgreSQL; без nginx приложение
+генерирует идентификатор самостоятельно.
+
+### Проверки
+
+```bash
+make test
+```
+
+Интеграционный тест создаёт уникальную временную схему PostgreSQL и удаляет её
+после завершения, не трогая таблицы приложения. Проверяются миграции, повторный
+запуск и откат, сохранение старых данных, HTML-экранирование, валидация формы,
+редиректы, HEAD, health-check и демо-эндпоинты. Для каждого реального HTTP-ответа
+проверяется точное совпадение статуса и полного тела с JSON-журналом Monolog.
+Требуются доступ к БД и право создавать схему (у пользователя из `.env.example`
+они есть). В `app/` без Docker тот же тест запускается командой `composer test`
+с настроенными переменными подключения и PHP 8.5 с требуемыми расширениями.
+
+GitHub Actions собирает базовый Docker-стек, проверяет зависимости и синтаксис,
+применяет миграции, выполняет интеграционные тесты и HTTP-проверку через nginx.
 
 ## Когда пересобирать, а когда достаточно F5 или restart
 
@@ -47,17 +149,9 @@ make init && make up && make composer
 
 ## Ловушка: initdb выполняется только один раз
 
-`docker/postgres/initdb/*.sql` применяется исключительно при инициализации
-**пустого** тома `pgdata` — то есть один раз, при самом первом старте. Если
-окружение уже поднималось и вы правите `01-init.sql`, он не выполнится
-повторно сам по себе. Чтобы применить изменения — снести том и поднять
-заново:
-
-```bash
-make clean && make up
-```
-
-Это удалит все данные в PostgreSQL.
+Скрипты `docker/postgres/initdb/` выполняются при инициализации **пустого**
+тома `pgdata`. Изменения схемы приложения применяются командой `make migrate`
+и не требуют удаления тома. `make clean` удаляет все данные PostgreSQL и метрики.
 
 То же касается мониторинга: `initdb/02-monitoring.sh` создаёт пользователя
 для postgres-exporter и extension `pg_stat_statements` только на свежем томе.

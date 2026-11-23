@@ -13,7 +13,7 @@ declare(strict_types=1);
  * короткий всплеск не должен будить дежурного.
  */
 
-require __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../bootstrap.php';
 
 use App\Log;
 

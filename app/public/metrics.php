@@ -13,7 +13,7 @@ declare(strict_types=1);
  * Сам себя этот скрипт не инструментирует — см. начало instrumentation/prepend.php.
  */
 
-require __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/../bootstrap.php';
 
 use App\Metrics;
 use Prometheus\RenderTextFormat;

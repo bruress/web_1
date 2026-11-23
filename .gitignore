@@ -1,2 +1,4 @@
 .env
 app/vendor/
+app/storage/logs/*
+!app/storage/logs/.gitkeep
